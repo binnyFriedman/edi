@@ -1,6 +1,8 @@
 use std::fs::File;
+use std::io;
 use std::path::Path;
 use std::io::{Read, stdin, stdout, Write};
+use std::ops::{Add, Range, Sub};
 use termion::event::Key;
 use termion::input::TermRead;
 use termion::raw::IntoRawMode;
@@ -12,16 +14,112 @@ struct Document {
 }
 
 #[derive(Debug)]
-struct Coordinates {
-    pub  x: usize,
-    pub  y: usize,
+struct Coordinates<T> {
+      x: T,
+      y: T,
+      range: Range<T>,
 }
+
+impl<T: Add + Ord + Sub + Copy> Coordinates<T> {
+    fn new(range:Range<T>) -> Coordinates<T> {
+        Coordinates {
+            x: range.start,
+            y: range.start,
+            range,
+        }
+    }
+    fn set_x(&mut self, x: T) {
+        if x < self.range.start {
+            self.x = self.range.start;
+        } else if x > self.range.end {
+            self.x = self.range.end;
+        } else {
+            self.x = x;
+        }
+    }
+    fn set_y(&mut self, y: T) {
+        if y < self.range.start {
+            self.y = self.range.start;
+        } else if y > self.range.end {
+            self.y = self.range.end;
+        } else {
+            self.y = y;
+        }
+    }
+}
+
+struct EditorCoords {
+    cursor: Coordinates<usize>,
+    term_size: Coordinates<usize>,
+    range: Range<usize>,
+}
+enum EditorCoordinate{
+    X,
+    Y
+}
+impl EditorCoords{
+    fn new(term_size:Coordinates<usize>) -> EditorCoords {
+        let range = Range {
+            start: 1,
+            end: term_size.x,
+        };
+        EditorCoords {
+            cursor: Coordinates::new(range.clone()),
+            term_size,
+            range,
+        }
+    }
+   fn get_zero_based(&self,coord:EditorCoordinate) -> usize {
+       match coord {
+           EditorCoordinate::X => self.cursor.x - 1,
+           EditorCoordinate::Y => self.cursor.y - 1,
+       }
+   }
+    fn get_zero_x(&self) -> usize {
+        self.get_zero_based(EditorCoordinate::X)
+    }
+    fn get_zero_y(&self) -> usize {
+        self.get_zero_based(EditorCoordinate::Y)
+    }
+   fn get_x(&self) -> usize {
+       self.cursor.x
+   }
+   fn get_y(&self) -> usize {
+       self.cursor.y
+   }
+    fn up(&mut self) {
+        self.cursor.set_y(self.cursor.y - 1);
+    }
+    fn down(&mut self,document_len:usize) {
+        if self.cursor.y < document_len {
+            self.cursor.set_y(self.cursor.y + 1);
+        }
+    }
+    fn left(&mut self) {
+        self.cursor.set_x(self.cursor.x - 1);
+    }
+    fn right(&mut self, max_x: usize) {
+        if self.cursor.x < max_x {
+            self.cursor.set_x(self.cursor.x + 1);
+        }
+    }
+    fn home(&mut self) {
+        self.cursor.set_x(self.range.start);
+    }
+    fn page_up(&mut self) {
+        self.cursor.set_y(self.cursor.y - self.term_size.y);
+    }
+    fn page_down(&mut self) {
+        self.cursor.set_y(self.cursor.y + self.term_size.y);
+    }
+}
+
+
 
 pub struct Editor {
     document: Document,
-    cursor: Coordinates,
     dirty: bool,
-    terminal_size: Coordinates,
+    coords: EditorCoords,
     path: String,
 }
 
@@ -31,55 +129,40 @@ impl Editor {
             lines: Vec::new(),
             len: 0,
         };
-        let cursor = Coordinates {
-            x: 1,
-            y: 0,
-        };
+        let(terminal_x, terminal_y) = termion::terminal_size().unwrap();
+        let mut terminal_size = Coordinates::new(1..terminal_y as usize);
+        terminal_size.set_x(terminal_x as usize);
         let dirty = false;
-        let terminal_size = Coordinates {
-            x: 0,
-            y: 0,
-        };
         let mut file  = File::open(path).unwrap();
         let mut filecontents = String::new();
         file.read_to_string(&mut filecontents).unwrap();
-        let mut lines = filecontents.lines();
-        while let Some(line) = lines.next() {
+        let lines = filecontents.lines();
+        for line in lines {
             document.lines.push(line.to_string());
             document.len += 1;
         }
-        let mut editor = Editor {
+
+        Editor {
             document,
-            cursor,
             dirty,
-            terminal_size,
+            coords: EditorCoords::new(terminal_size),
             path: path.to_string_lossy().to_string(),
-        };
-        editor.update_terminal_size();
-        editor
+        }
     }
 
-    pub fn update_terminal_size(&mut self) {
-        let (x,y) = termion::terminal_size().unwrap();
-        self.terminal_size.x = x as usize;
-        self.terminal_size.y = y as usize;
-    }
 
     pub fn start(&mut self){
         let mut stdout = stdout().into_raw_mode().unwrap();
         loop {
-            let stdin = stdin();
-            let key = stdin.keys().next();
-            if key.is_none() {
-                continue;
-            }
-            let key = key.unwrap().unwrap();
+            let stdin = io::stdin();
+            let stdin = stdin.lock();
+
+            let key = stdin.keys().next().unwrap();
+
+            let key = key.unwrap();
             match key {
                 Key::Char('\n') => {
                     self.insert_newline();
-                }
-                Key::Char('\t') => {
-                    self.insert_tab();
                 }
                 Key::Char(c) => {
                     self.insert_char(c);
@@ -91,28 +174,28 @@ impl Editor {
                     self.delete();
                 }
                 Key::Left => {
-                    self.move_cursor_left();
+                    self.coords.left();
                 }
                 Key::Right => {
-                    self.move_cursor_right();
+                    self.coords.right(self.get_line_length());
                 }
                 Key::Up => {
-                    self.move_cursor_up();
+                    self.coords.up();
                 }
                 Key::Down => {
-                    self.move_cursor_down();
+                    self.coords.down(self.document.len);
                 }
                 Key::Home => {
-                    self.move_cursor_home();
+                    self.coords.home();
                 }
                 Key::End => {
-                    self.move_cursor_end();
+                    self.coords.cursor.set_x(self.get_line_length());
                 }
                 Key::PageUp => {
-                    self.move_cursor_pageup();
+                    self.coords.page_up();
                 }
                 Key::PageDown => {
-                    self.move_cursor_pagedown();
+                    self.coords.page_down();
                 }
                 Key::Ctrl('q') => {
                     break;
@@ -133,132 +216,100 @@ impl Editor {
         self.document.len += 1;
     }
 
+    fn get_line_length(&self) -> usize {
+        self.document.lines[self.coords.get_zero_y()].chars().count()
+    }
+
     pub(crate) fn render(&mut self) {
         //maintain cursor position
-        print!("{}{}",termion::clear::All, termion::cursor::Goto(1, 1));
+        print!("{}{}",termion::clear::All,termion::cursor::Goto(1, 1));
         if self.document.len == 0 {
             self.add_line("\r".to_string());
         }
 
         //determine the start and end of the viewport
         let mut start = 0;
-        let mut end = self.terminal_size.y;
+        let mut end = self.coords.term_size.y;
 
-        if self.document.len < self.terminal_size.y {
+        if self.document.len < self.coords.term_size.y {
             end = self.document.len;
-        }else if self.cursor.y > self.terminal_size.y {
-            start = self.cursor.y.checked_sub(self.terminal_size.y).unwrap_or(0);
-            end = self.cursor.y;
+        }else if self.coords.get_y() > self.coords.term_size.y {
+            start = self.coords.get_zero_y() - self.coords.term_size.y;
+            end = self.coords.get_y();
         }
-
+        if end > self.document.len {
+            end = self.document.len;
+        }
         //print all lines
         for line in start..end {
-            println!("{}\r",self.document.lines[line]);
+            print!("{}\r\n",self.document.lines[line]);
         }
-        println!("{}{} Cursor: {}:{}\t ViewPort: {}:{},\t {}{}",
+        self.print_footer(start, end);
+    }
+
+    fn print_footer(&mut self,start: usize, end: usize) {
+        Editor::print_cursor(1, self.coords.term_size.y +1);
+        println!("{}{} Cursor: {}:{}\t ViewPort: {}:{}\t,  TermSize: {}:{} \t {}{}",
                  color::Bg(color::Cyan),
                  color::Fg(color::Black),
-                 self.cursor.x,
-                 self.cursor.y,
+                 self.coords.get_x(),
+                 self.coords.get_y(),
                  start,end,
+                 self.coords.term_size.x,
+                 self.coords.term_size.y,
                  color::Fg(color::Reset),color::Bg(color::Reset));
-
-        self.update_cursor_position(self.cursor.x, self.cursor.y);
+        Editor::print_cursor(self.coords.get_x(), self.coords.get_y());
     }
 
     fn insert_newline(&mut self) {
+        let y = self.coords.get_zero_based(EditorCoordinate::Y);
+        let x = self.coords.get_zero_based(EditorCoordinate::X);
         //break the line at the cursor
-        let mut line = self.document.lines[self.cursor.y].clone();
-        let mut newline = line.split_off(self.cursor.x-1);
-        if newline.len() == 0 {
+        let mut line = self.document.lines[y].clone();
+        let mut newline = line.split_off(x);
+        if newline.chars().count() == 0 {
             newline = "\r".to_string();
         }
         //remove the characters after the cursor
-        self.document.lines[self.cursor.y].truncate(self.cursor.x-1);
-        self.document.lines.insert(self.cursor.y, newline);
-        self.cursor.y += 1;
-        self.cursor.x = 0;
+        self.document.lines[y].truncate(x);
+        self.document.lines.insert(y, newline);
         self.document.len += 1;
+        self.coords.down(self.document.len);
+        self.coords.cursor.set_x(1);
     }
-    fn insert_tab(&mut self) {
-        self.insert_char('\t');
-    }
+
     fn backspace(&mut self) {
         self.delete();
     }
     fn delete(&mut self) {
-        let mut index = self.cursor.x.clone();
-        if index > 0 {
-            index -= 1;
-        }
+        let index = self.coords.get_zero_x();
         let line = self.get_current_line();
         //check if there are any characters left in the line
         if line.chars().count() < 2 {
-            //if there are no characters left, delete the line
             self.delete_line();
         }else{
             //find the character to delete
             line.remove(index);
-            self.move_cursor_left();
+            self.coords.left();
         }
     }
     fn get_current_line(&mut self) -> &mut String {
-        &mut self.document.lines[self.cursor.y]
+        &mut self.document.lines[self.coords.get_zero_y()]
     }
 
     fn insert_char(&mut self, c: char) {
-        let index = self.cursor.x.clone();
+        let index = self.coords.get_zero_x();
         let line = self.get_current_line();
         line.insert(index, c);
-        self.move_cursor_right();
+        self.coords.right(self.get_line_length());
     }
-    fn move_cursor_left(&mut self) {
-        self.cursor.x -= 1;
-    }
-    fn move_cursor_right(&mut self) {
-        self.cursor.x += 1;
-    }
-    fn move_cursor_up(&mut self) {
-        if self.cursor.y > 0 {
-            self.cursor.y -= 1;
-        }
-    }
-
-    fn move_cursor_down(&mut self) {
-        self.cursor.y += 1;
-    }
-    fn move_cursor_home(&mut self) {
-        self.cursor.x = 1;
-    }
-    fn move_cursor_end(&mut self) {
-        self.cursor.x = self.terminal_size.x;
-    }
-    fn update_cursor_position(&mut self,x: usize, y: usize) {
-        self.cursor.x = x;
-        self.cursor.y = y;
-        if self.cursor.y >= self.document.len {
-            self.cursor.y = self.document.len.checked_sub(1).unwrap_or(0);
-        }
-        let line = &self.document.lines[self.cursor.y];
-        if (self.cursor.x) >= line.chars().count() {
-            self.cursor.x = line.chars().count();
-        }
-        if self.cursor.x < 1 {
-            self.cursor.x = 1;
-        }
-        println!("{}", termion::cursor::Goto(self.cursor.x as u16, self.cursor.y as u16));
-    }
-    fn move_cursor_pageup(&mut self) {
-        self.cursor.y = self.cursor.y.checked_sub(self.terminal_size.y).unwrap_or(0);
-    }
-
-    fn move_cursor_pagedown(&mut self) {
-        self.cursor.y = self.cursor.y + self.terminal_size.y;
+    fn print_cursor(x: usize, y: usize) {
+        print!("{}", termion::cursor::Goto(x as u16, y as u16));
     }
     fn delete_line(&mut self) {
-        self.document.lines.remove(self.cursor.y);
+        self.document.lines.remove(self.coords.get_zero_based(EditorCoordinate::Y));
         self.document.len -= 1;
-        self.cursor.y = self.cursor.y.checked_sub(1).unwrap_or(0);
+        self.coords.up();
     }
     fn save(&self) {
         if !self.dirty {
