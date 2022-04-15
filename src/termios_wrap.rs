@@ -1,3 +1,4 @@
+use std::fmt::{Display, Error, Formatter};
 use std::io;
 use std::io::{Read, stdout, Write};
 use std::os::unix::io::{AsRawFd, RawFd};
@@ -215,3 +216,63 @@ pub fn get_key_stroke(mut fd: &mut impl Read)->Result<Key, io::Error>{
         Err(_) => Ok(Key::Unknown)
     }
 }
+
+pub enum Color{
+    Black,
+    Red,
+    Green,
+    Yellow,
+    Blue,
+    Magenta,
+    Cyan,
+    White,
+    BrightBlack,
+    BrightRed,
+    BrightGreen,
+    BrightYellow,
+    BrightBlue,
+    BrightMagenta,
+    BrightCyan,
+    BrightWhite,
+}
+
+impl Display for Color{
+    fn fmt(&self, f: &mut Formatter<'_>) -> Result<(), Error> {
+        match self {
+            Color::Black => write!(f, "30"),
+            Color::Red => write!(f, "31"),
+            Color::Green => write!(f, "32"),
+            Color::Yellow => write!(f, "33"),
+            Color::Blue => write!(f, "34"),
+            Color::Magenta => write!(f, "35"),
+            Color::Cyan => write!(f, "36"),
+            Color::White => write!(f, "37"),
+            Color::BrightBlack => write!(f, "90"),
+            Color::BrightRed => write!(f, "91"),
+            Color::BrightGreen => write!(f, "92"),
+            Color::BrightYellow => write!(f, "93"),
+            Color::BrightBlue => write!(f, "94"),
+            Color::BrightMagenta => write!(f, "95"),
+            Color::BrightCyan => write!(f, "96"),
+            Color::BrightWhite => write!(f, "97"),
+        }
+    }
+}
+
+pub enum ColorPos{
+    Fg(Color),
+    Bg(Color),
+    Reset,
+}
+
+impl Display for ColorPos{
+    fn fmt(&self, f: &mut Formatter<'_>) -> Result<(), Error> {
+        match self {
+            ColorPos::Fg(c) => write!(f, "\x1b[38;5;{}m", c),
+            ColorPos::Bg(c) => write!(f, "\x1b[48;5;{}m", c),
+            ColorPos::Reset => write!(f, "\x1b[0m"),
+        }
+    }
+}
+
+

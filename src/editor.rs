@@ -1,8 +1,7 @@
-use std::io;
-use std::io::{stdout, Write};
+use std::{cmp, io};
+use std::io::{Read, stdout, Write};
 use crate::termios_wrap;
-use crate::termios_wrap::{ArrowDirection, Erase, get_key_stroke, get_window_size, Key, TCC, term_sequence};
-
+use crate::termios_wrap::{ArrowDirection, Erase, get_key_stroke, get_window_size, Key, TCC, term_sequence,Color,ColorPos};
 
 struct Buffer {
     data: Vec<char>,
@@ -38,13 +37,19 @@ impl Buffer{
     }
 }
 
+struct Erow{
+    data: Vec<char>,
+}
 
 pub struct Editor {
     screen_rows: usize,
     screen_cols: usize,
     cx: usize,
     cy: usize,
+    row_offset: usize,
+    col_offset: usize,
     buffer: Buffer,
+    rows: Vec<Erow>,
 }
 impl Editor{
     pub(crate) fn new() ->Editor{
@@ -53,7 +58,10 @@ impl Editor{
             screen_cols: 0,
             cx: 0,
             cy: 0,
-            buffer: Buffer::new()
+            row_offset: 0,
+            col_offset: 0,
+            buffer: Buffer::new(),
+            rows: Vec::new(),
         }
     }
     fn update_screen_size(&mut self){
@@ -73,30 +81,51 @@ impl Editor{
             self.process_key(key)?;
         }
     }
+    pub fn open(&mut self, file_name: &str)->Result<(),io::Error>{
+        let mut file = std::fs::File::open(file_name)?;
+        let mut contents = String::new();
+        file.read_to_string(&mut contents)?;
+
+        self.rows = contents.lines().map(|l| Erow{data: l.chars().collect()}).collect();
+        Ok(())
+    }
     fn header(&mut self)->String{
+
         let message = "Welcome to Edi";
         let padding = (self.screen_cols - message.len() - 2)/2;
         let padding_str = "=".repeat(padding);
-        format!("{} {} {}",padding_str,message,padding_str)
+        format!("{} {}{}{} {}",padding_str,ColorPos::Fg(Color::BrightCyan),message,ColorPos::Reset,padding_str)
     }
     fn refresh_screen(&mut self)->Result<(), io::Error>{
-        self.buffer.append_str(&term_sequence(TCC::Hide));
+        self.scroll();
         self.buffer.append_str(&term_sequence(TCC::PosC(1, 1)));
+        self.buffer.append_str(&term_sequence(TCC::Hide));
         self.draw_rows();
         self.append_cursor();
         self.buffer.append_str(&term_sequence(TCC::Show ));
         Ok(())
     }
 
-    fn draw_rows(&mut self){
-        for index in 0..self.screen_rows{
-            if index == self.screen_rows / 3 {
+    fn draw_rows(&mut self) {
+        for index in 0..self.screen_rows {
+            let file_row = index + self.row_offset;
+            if index < self.rows.len() {
+                let row = &self.rows[file_row];
+                //with horizontal offset, check if we past the end of the row
+                let row_start = cmp::min(self.col_offset, row.data.len());
+                let row_end = cmp::min(row_start + self.screen_cols, row.data.len());
+                let row_str = &row.data[row_start..row_end].iter().collect::<String>();
+                self.buffer.append_str(row_str);
+            } else if self.rows.is_empty() && index == self.screen_rows / 3 {
                 let message = self.header();
                 self.buffer.append_str(&message);
-            }else{
+            } else {
                 self.buffer.append_char('~');
             }
-            self.buffer.append_line(&term_sequence(TCC::EraseLine(Erase::FromCursor)));
+            self.buffer.append_str(&term_sequence(TCC::EraseLine(Erase::FromCursor)));
+            if index < self.screen_rows - 1{
+                self.buffer.append_line("");
+            }
         }
     }
     fn process_arrow(&mut self,dir:ArrowDirection){
@@ -107,20 +136,29 @@ impl Editor{
                 }
             },
             ArrowDirection::Down => {
-                if self.cy < self.screen_rows - 1 {
+                if self.cy < self.rows.len()-1 {
                     self.cy += 1;
                 }
             },
             ArrowDirection::Right => {
-                if self.cx < self.screen_cols - 1 {
+                if self.cy <= self.rows.len() && self.cx < self.rows[self.cy].data.len() {
                     self.cx += 1;
+                }else if self.cy < self.rows.len() {
+                    self.cx = 0;
+                    self.cy += 1;
                 }
             },
             ArrowDirection::Left => {
                 if self.cx > 0 {
                     self.cx -= 1;
+                }else if self.cy > 0{
+                    self.cy -= 1;
+                    self.cx = self.rows[self.cy].data.len();
                 }
             }
+        }
+        if self.cx > self.rows[self.cy].data.len() {
+            self.cx = self.rows[self.cy].data.len();
         }
     }
     fn process_key(&mut self, key: Key) ->Result<(), io::Error>{
@@ -172,6 +210,19 @@ impl Editor{
         Ok(())
     }
 
+    fn scroll(&mut self){
+        if self.cy < self.row_offset {
+            self.row_offset = self.cy;
+        } else if self.cy >= self.row_offset + self.screen_rows {
+            self.row_offset = self.cy - self.screen_rows + 1;
+        }
+        if self.cx < self.col_offset {
+            self.col_offset = self.cx;
+        } else if self.cx >= self.col_offset + self.screen_cols {
+            self.col_offset = self.cx - self.screen_cols + 1;
+        }
+    }
+
     fn print_buffer(&mut self) -> Result<(), io::Error>{
         let buffer_str = self.buffer.get_all();
         print!("{}", buffer_str);
@@ -181,6 +232,6 @@ impl Editor{
     }
 
     fn append_cursor(&mut self){
-        self.buffer.append_str(&term_sequence(TCC::PosC(self.cy+1,self.cx+1)));
+        self.buffer.append_str(&term_sequence(TCC::PosC(self.cy-self.row_offset +1,self.cx - self.col_offset+1)));
     }
 }
